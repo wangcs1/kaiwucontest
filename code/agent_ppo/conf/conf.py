@@ -66,6 +66,19 @@ class Config:
     PRE_SURVIVAL_WEIGHT = 0.9
     POST_SURVIVAL_WEIGHT = 1.7
 
+    # Fine-grained shaping controls / 细粒度奖励塑形参数
+    TREASURE_APPROACH_GAIN = 0.065
+    CLOSE_TREASURE_RADIUS = 10.0
+    CLOSE_TREASURE_BONUS = 0.06
+    CLOSE_TREASURE_PULL_GAIN = 0.07
+    BUFF_APPROACH_GAIN = 0.06
+    BUFF_PICK_GAIN = 0.075
+    SPEED_BUFF_NEAR_BONUS = 0.08
+
+    ESCAPE_EXPAND_GAIN = 0.055
+    SAFE_IDLE_PENALTY = 0.03
+    FLASH_MISS_PENALTY = 0.045
+
     # Train / val split & curriculum / 训练验证拆分与课程学习
     TRAIN_MAPS = [1, 2, 3, 4, 5, 6, 7, 8]
     VAL_MAPS = [9, 10]

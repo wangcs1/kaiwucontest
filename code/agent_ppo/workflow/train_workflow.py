@@ -274,6 +274,8 @@ class EpisodeRunner:
             "invalid_move_cnt": 0.0,
             "flash_escape_cnt": 0.0,
             "flash_abuse_cnt": 0.0,
+            "safe_idle_cnt": 0.0,
+            "speedup_bias_cnt": 0.0,
         }
 
     def _update_phase_stats(self, ep_stats, remain_info):
@@ -288,6 +290,8 @@ class EpisodeRunner:
         ep_stats["invalid_move_cnt"] += float(remain_info.get("invalid_move", 0.0))
         ep_stats["flash_escape_cnt"] += float(remain_info.get("flash_escape", 0.0))
         ep_stats["flash_abuse_cnt"] += float(remain_info.get("flash_abuse", 0.0))
+        ep_stats["safe_idle_cnt"] += float(remain_info.get("safe_idle", 0.0))
+        ep_stats["speedup_bias_cnt"] += float(remain_info.get("speedup_bias", 0.0))
         if is_speedup:
             ep_stats["post_steps"] += 1.0
             ep_stats["post_total_r"] += shaped
@@ -340,6 +344,8 @@ class EpisodeRunner:
         ep_stats["invalid_move_rate"] = ep_stats["invalid_move_cnt"] / total_steps
         ep_stats["flash_escape_rate"] = ep_stats["flash_escape_cnt"] / total_steps
         ep_stats["flash_abuse_rate"] = ep_stats["flash_abuse_cnt"] / total_steps
+        ep_stats["safe_idle_rate"] = ep_stats["safe_idle_cnt"] / total_steps
+        ep_stats["speedup_bias_rate"] = ep_stats["speedup_bias_cnt"] / total_steps
         ep_stats["pre_safety"] = ep_stats["pre_safety_sum"] / max(ep_stats["pre_steps"], 1.0)
         ep_stats["post_safety"] = ep_stats["post_safety_sum"] / max(ep_stats["post_steps"], 1.0)
         ep_stats["pre_encircle"] = ep_stats["pre_encircle_sum"] / max(ep_stats["pre_steps"], 1.0)
@@ -388,6 +394,8 @@ class EpisodeRunner:
             f"{prefix}invalid_move_rate": round(ep_stats["invalid_move_rate"], 4),
             f"{prefix}flash_escape_rate": round(ep_stats["flash_escape_rate"], 4),
             f"{prefix}flash_abuse_rate": round(ep_stats["flash_abuse_rate"], 4),
+            f"{prefix}safe_idle_rate": round(ep_stats["safe_idle_rate"], 4),
+            f"{prefix}speedup_bias_rate": round(ep_stats["speedup_bias_rate"], 4),
             "episode_cnt": round(ep_stats["episode"], 4),
         }
         return data

@@ -57,6 +57,8 @@ class Preprocessor:
         self.last_flash_cd = 0.0
         self.last_nearest_monster_dist = MAP_SIZE * 1.41
         self.last_nearest_treasure_dist = MAP_SIZE * 1.41
+        self.last_nearest_buff_dist = MAP_SIZE * 1.41
+        self.last_nearest_speed_buff_dist = MAP_SIZE * 1.41
         self.last_step_score = 0.0
         self.last_treasure_score = 0.0
         self.last_total_score = 0.0
@@ -66,6 +68,7 @@ class Preprocessor:
         self.last_flash_used = 0.0
         self.last_flash_ready = 0.0
         self.last_flash_legal = 1.0
+        self.last_danger = 0.0
 
     def feature_process(self, env_obs, last_action):
         observation = env_obs.get("observation", {})
@@ -99,6 +102,8 @@ class Preprocessor:
         nearest_monster_dist = monsters[0]["dist"] if monsters else MAP_SIZE * 1.41
         second_monster_dist = monsters[1]["dist"] if len(monsters) > 1 else MAP_SIZE * 1.41
         nearest_treasure_dist = self._nearest_entity_dist(treasures, hero_x, hero_z)
+        nearest_buff_dist = self._nearest_entity_dist(buffs, hero_x, hero_z)
+        nearest_speed_buff_dist = self._nearest_speed_buff_dist(buffs, hero_x, hero_z)
 
         map_grid_feat, map_stats_feat = self._extract_map_feature(map_info)
         openness = float(map_stats_feat[0])
@@ -165,20 +170,26 @@ class Preprocessor:
             nearest_monster_dist=nearest_monster_dist,
             second_monster_dist=second_monster_dist,
             nearest_treasure_dist=nearest_treasure_dist,
+            nearest_buff_dist=nearest_buff_dist,
+            nearest_speed_buff_dist=nearest_speed_buff_dist,
             time_to_speedup=time_to_speedup,
             is_speedup=is_speedup,
             openness=openness,
             map_stats_feat=map_stats_feat,
             flash_cd=flash_cd,
             flash_ready=flash_ready,
+            buff_remain=buff_remain,
             last_action=last_action,
         )
 
         self.last_pos = (hero_x, hero_z)
         self.last_nearest_monster_dist = nearest_monster_dist
         self.last_nearest_treasure_dist = nearest_treasure_dist
+        self.last_nearest_buff_dist = nearest_buff_dist
+        self.last_nearest_speed_buff_dist = nearest_speed_buff_dist
         self.last_flash_ready = flash_ready
         self.last_flash_cd = flash_cd
+        self.last_danger = 1.0 - _norm(nearest_monster_dist, 30.0)
 
         remain_info = {
             "reward": [reward],
@@ -201,6 +212,8 @@ class Preprocessor:
             "invalid_move": float(reward_items["invalid_move"]),
             "flash_escape": float(reward_items["flash_escape"]),
             "flash_abuse": float(reward_items["flash_abuse"]),
+            "safe_idle": float(reward_items["safe_idle"]),
+            "speedup_bias": float(reward_items["speedup_bias"]),
         }
         return feature, legal_action, remain_info
 
@@ -365,6 +378,27 @@ class Preprocessor:
             )
         return feat
 
+    def _is_speed_buff(self, buff):
+        if not isinstance(buff, dict):
+            return False
+        buff_type = str(_pick(buff, ["type", "buff_type", "buffType", "name"], "")).lower()
+        tags = str(_pick(buff, ["tag", "tags", "desc", "description"], "")).lower()
+        marker = buff_type + " " + tags
+        return ("speed" in marker) or ("acceler" in marker) or ("加速" in marker)
+
+    def _nearest_speed_buff_dist(self, buffs, hero_x, hero_z):
+        best = MAP_SIZE * 1.41
+        buffs = buffs if isinstance(buffs, list) else []
+        for b in buffs:
+            if not self._is_speed_buff(b):
+                continue
+            active = float(_pick(b, ["is_valid", "valid", "is_active", "active"], 1.0))
+            if active <= 0.5:
+                continue
+            bx, bz = _pos(b)
+            best = min(best, _dist(hero_x, hero_z, bx, bz))
+        return best
+
     def _update_visit_ratio(self, hero_x, hero_z):
         gx = int(hero_x // 4.0)
         gz = int(hero_z // 4.0)
@@ -381,12 +415,15 @@ class Preprocessor:
         nearest_monster_dist,
         second_monster_dist,
         nearest_treasure_dist,
+        nearest_buff_dist,
+        nearest_speed_buff_dist,
         time_to_speedup,
         is_speedup,
         openness,
         map_stats_feat,
         flash_cd,
         flash_ready,
+        buff_remain,
         last_action,
     ):
         step_score = float(_pick(env_info, ["step_score", "stepScore"], 0.0))
@@ -414,7 +451,52 @@ class Preprocessor:
         monster_dist_reward = survival_weight * 0.07 * np.clip(monster_dist_delta / 4.0, -1.0, 1.0)
 
         treasure_dist_delta = self.last_nearest_treasure_dist - nearest_treasure_dist
-        treasure_approach_reward = resource_weight * 0.04 * np.clip(treasure_dist_delta / 3.0, -1.0, 1.0) * (1.0 - 0.7 * danger)
+        treasure_approach_reward = (
+            resource_weight
+            * Config.TREASURE_APPROACH_GAIN
+            * np.clip(treasure_dist_delta / 3.0, -1.0, 1.0)
+            * (1.0 - 0.55 * danger)
+        )
+
+        close_treasure_bonus = 0.0
+        close_treasure_pull = 0.0
+        if nearest_treasure_dist < Config.CLOSE_TREASURE_RADIUS:
+            close_focus = np.clip(
+                (Config.CLOSE_TREASURE_RADIUS - nearest_treasure_dist) / max(Config.CLOSE_TREASURE_RADIUS, 1.0),
+                0.0,
+                1.0,
+            )
+            close_treasure_bonus = (
+                resource_weight
+                * Config.CLOSE_TREASURE_BONUS
+                * close_focus
+                * (1.0 - 0.5 * danger)
+            )
+            # Near a treasure, heavily encourage continuing to close in and discourage backing off.
+            close_treasure_pull = (
+                resource_weight
+                * Config.CLOSE_TREASURE_PULL_GAIN
+                * np.clip(treasure_dist_delta / 1.8, -1.0, 1.0)
+                * (1.0 - 0.45 * danger)
+            )
+
+        buff_dist_delta = self.last_nearest_buff_dist - nearest_buff_dist
+        buff_approach_reward = (
+            resource_weight
+            * Config.BUFF_APPROACH_GAIN
+            * np.clip(buff_dist_delta / 2.5, -1.0, 1.0)
+            * (1.0 - 0.35 * danger)
+        )
+
+        speed_buff_dist_delta = self.last_nearest_speed_buff_dist - nearest_speed_buff_dist
+        speed_buff_need = 1.0 if buff_remain <= 1.0 else 0.0
+        speed_buff_near_bonus = 0.0
+        if nearest_speed_buff_dist < MAP_SIZE * 1.3 and speed_buff_need > 0.5:
+            speed_buff_near_bonus = (
+                Config.SPEED_BUFF_NEAR_BONUS
+                * np.clip(speed_buff_dist_delta / 2.0, -1.0, 1.0)
+                * (1.0 - 0.5 * danger)
+            )
 
         survive_reward = 0.008 + 0.012 * survival_focus + (0.01 if is_speedup > 0.5 else 0.0)
 
@@ -439,6 +521,15 @@ class Preprocessor:
         invalid_move = 1.0 if (last_action >= 0 and move_dist < 0.25) else 0.0
         invalid_move_penalty = -(0.015 + 0.045 * danger) * invalid_move
 
+        safe_idle = 1.0 if (danger < 0.25 and move_dist < 0.45 and last_action >= 0) else 0.0
+        safe_idle_penalty = -Config.SAFE_IDLE_PENALTY * safe_idle
+
+        # Reward continued movement right after creating distance from monsters.
+        danger_drop = self.last_danger - danger
+        escape_expand_reward = 0.0
+        if danger_drop > 0.1 and move_dist > 0.8:
+            escape_expand_reward = Config.ESCAPE_EXPAND_GAIN * np.clip(danger_drop / 0.2, 0.0, 1.0)
+
         gx = int(hero_pos[0] // 4.0)
         gz = int(hero_pos[1] // 4.0)
         repeat_cnt = self.visit_counter.get((gx, gz), 1)
@@ -455,9 +546,23 @@ class Preprocessor:
                 flash_escape_reward = 0.1 + 0.08 * survival_focus
             else:
                 flash_abuse_penalty = -(0.06 + 0.05 * survival_focus)
+
+        flash_miss_penalty = 0.0
+        if (
+            flash_used < 0.5
+            and self.last_flash_ready > 0.5
+            and self.last_flash_legal > 0.5
+            and self.last_danger > 0.55
+            and nearest_monster_dist < self.last_nearest_monster_dist - 0.8
+        ):
+            flash_miss_penalty = -Config.FLASH_MISS_PENALTY
         self.last_flash_used = flash_used
 
-        resource_reward = resource_weight * (0.018 * step_gain + 0.1 * treasure_gain + 0.055 * buff_gain)
+        resource_reward = resource_weight * (
+            0.018 * step_gain
+            + 0.12 * treasure_gain
+            + Config.BUFF_PICK_GAIN * buff_gain
+        )
 
         survival_reward = (
             survive_reward
@@ -473,11 +578,18 @@ class Preprocessor:
         reward = (
             resource_reward
             + treasure_approach_reward
+            + close_treasure_bonus
+            + close_treasure_pull
+            + buff_approach_reward
+            + speed_buff_near_bonus
             + survival_reward
             + invalid_move_penalty
+            + safe_idle_penalty
             + repeat_penalty
+            + escape_expand_reward
             + flash_escape_reward
             + flash_abuse_penalty
+            + flash_miss_penalty
         )
         reward = float(np.clip(reward, -2.0, 2.0))
 
@@ -497,6 +609,8 @@ class Preprocessor:
             "invalid_move": invalid_move,
             "flash_escape": 1.0 if flash_escape_reward > 0.0 else 0.0,
             "flash_abuse": 1.0 if flash_abuse_penalty < 0.0 else 0.0,
+            "safe_idle": safe_idle,
+            "speedup_bias": 1.0 if speed_buff_near_bonus > 0.0 else 0.0,
         }
         return reward, reward_items
 

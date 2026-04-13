@@ -47,6 +47,33 @@ class Config:
     # Action space / 动作空间：8个移动方向
     ACTION_NUM = 8
 
+    # Rule-guided logit bias / 规则引导 logits 偏置
+    RULE_GUIDE_ENABLE = True
+    RULE_GUIDE_ENABLE_EVAL = False
+    RULE_GUIDE_ANNEAL_STEPS = 800000
+    RULE_GUIDE_ANNEAL_POWER = 1.2
+    RULE_GUIDE_MAX_BIAS = 0.8
+    RULE_GUIDE_DANGER_TRIGGER = 0.45
+    RULE_GUIDE_TREASURE_TRIGGER = 0.18
+    RULE_GUIDE_MIN_SCALE = 0.05
+    RULE_GUIDE_CONF_UPPER = 0.72
+    RULE_GUIDE_CONF_LOWER = 0.38
+    RULE_GUIDE_ENTROPY_FLOOR = 0.45
+    RULE_GUIDE_ESCAPE_WEIGHT = 1.0
+    RULE_GUIDE_TREASURE_WEIGHT = 0.6
+    # Action-direction mapping for 8-way movement.
+    # If your environment uses a different action order, adjust this table.
+    RULE_GUIDE_ACTION_DIRS = (
+        (0.0, 1.0),
+        (1.0, 1.0),
+        (1.0, 0.0),
+        (1.0, -1.0),
+        (0.0, -1.0),
+        (-1.0, -1.0),
+        (-1.0, 0.0),
+        (-1.0, 1.0),
+    )
+
     # Value head / 价值头：单头生存奖励
     VALUE_NUM = 1
 

@@ -10,6 +10,7 @@ Agent class for Gorge Chase PPO.
 峡谷追猎 PPO Agent 主类。
 """
 
+import math
 import torch
 
 torch.set_num_threads(1)
@@ -39,6 +40,7 @@ class Agent(BaseAgent):
         self.algorithm = Algorithm(self.model, self.optimizer, self.device, logger, monitor)
         self.preprocessor = Preprocessor()
         self.last_action = -1
+        self.infer_step = 0
         self.logger = logger
         self.monitor = monitor
         super().__init__(agent_type, device, logger, monitor)
@@ -63,7 +65,7 @@ class Agent(BaseAgent):
         )
         return obs_data, remain_info
 
-    def predict(self, list_obs_data):
+    def predict(self, list_obs_data, is_eval=False):
         """Stochastic inference for training (exploration).
 
         训练时随机采样动作（探索）。
@@ -71,7 +73,10 @@ class Agent(BaseAgent):
         feature = list_obs_data[0].feature
         legal_action = list_obs_data[0].legal_action
 
-        logits, value, prob = self._run_model(feature, legal_action)
+        if not is_eval:
+            self.infer_step += 1
+
+        logits, value, prob = self._run_model(feature, legal_action, is_eval=is_eval)
 
         action = self._legal_sample(prob, use_max=False)
         d_action = self._legal_sample(prob, use_max=True)
@@ -91,7 +96,7 @@ class Agent(BaseAgent):
         评估时贪心选择动作（利用）。
         """
         obs_data, _ = self.observation_process(env_obs)
-        act_data = self.predict([obs_data])
+        act_data = self.predict([obs_data], is_eval=True)
         return self.action_process(act_data[0], is_stochastic=False)
 
     def learn(self, list_sample_data):
@@ -129,7 +134,7 @@ class Agent(BaseAgent):
         self.last_action = int(action[0])
         return int(action[0])
 
-    def _run_model(self, feature, legal_action):
+    def _run_model(self, feature, legal_action, is_eval=False):
         """Run model inference, return logits, value, prob.
 
         执行模型推理，返回 logits、value 和动作概率。
@@ -142,12 +147,127 @@ class Agent(BaseAgent):
 
         logits_np = logits.cpu().numpy()[0]
         value_np = value.cpu().numpy()[0]
+        logits_biased = np.array(logits_np, copy=True)
+
+        if Config.RULE_GUIDE_ENABLE and (not is_eval or Config.RULE_GUIDE_ENABLE_EVAL):
+            logits_biased = self._apply_rule_guided_logit_bias(logits_biased, feature, legal_action)
 
         # Legal action masked softmax / 合法动作掩码 softmax
         legal_action_np = np.array(legal_action, dtype=np.float32)
-        prob = self._legal_soft_max(logits_np, legal_action_np)
+        prob = self._legal_soft_max(logits_biased, legal_action_np)
 
-        return logits_np, value_np, prob
+        return logits_biased, value_np, prob
+
+    def _apply_rule_guided_logit_bias(self, logits, feature, legal_action):
+        if len(logits) != Config.ACTION_NUM or len(legal_action) != Config.ACTION_NUM:
+            return logits
+
+        dirs = np.array(Config.RULE_GUIDE_ACTION_DIRS, dtype=np.float32)
+        if dirs.shape != (Config.ACTION_NUM, 2):
+            return logits
+
+        legal = np.array(legal_action, dtype=np.float32)
+        if np.sum(legal) <= 0.0:
+            return logits
+
+        # Anneal guidance over training so PPO can dominate later.
+        progress = min(1.0, float(self.infer_step) / max(float(Config.RULE_GUIDE_ANNEAL_STEPS), 1.0))
+        anneal = pow(max(0.0, 1.0 - progress), float(Config.RULE_GUIDE_ANNEAL_POWER))
+
+        masked_prob = self._legal_soft_max(logits, legal)
+        legal_idx = np.where(legal > 0.5)[0]
+        if legal_idx.size == 0:
+            return logits
+
+        sorted_prob = np.sort(masked_prob[legal_idx])
+        top1 = float(sorted_prob[-1])
+        top2 = float(sorted_prob[-2]) if sorted_prob.size > 1 else 0.0
+        conf_margin = top1 - top2
+
+        conf_upper = float(Config.RULE_GUIDE_CONF_UPPER)
+        conf_lower = float(Config.RULE_GUIDE_CONF_LOWER)
+        conf_span = max(conf_upper - conf_lower, 1e-6)
+        conf_scale = np.clip((conf_upper - top1) / conf_span, 0.0, 1.0)
+        margin_scale = np.clip(1.0 - conf_margin / 0.25, 0.0, 1.0)
+
+        legal_prob = masked_prob[legal_idx]
+        entropy = -float(np.sum(legal_prob * np.log(np.clip(legal_prob, 1e-9, 1.0))))
+        entropy_max = math.log(float(max(2, legal_idx.size)))
+        entropy_norm = entropy / max(entropy_max, 1e-6)
+        entropy_scale = np.clip((entropy_norm - float(Config.RULE_GUIDE_ENTROPY_FLOOR)) / 0.5, 0.0, 1.0)
+
+        # Parse compact state from feature vector.
+        hero_dim = Config.HERO_DIM
+        global_dim = Config.GLOBAL_DIM
+        map_grid_dim = Config.MAP_GRID_DIM
+        map_stat_dim = Config.MAP_STAT_DIM
+
+        hero_feat = np.asarray(feature[:hero_dim], dtype=np.float32)
+        treasure_start = hero_dim + global_dim + map_grid_dim + map_stat_dim
+        monster_start = treasure_start + Config.TREASURE_DIM
+
+        nearest_monster = float(np.clip(hero_feat[9], 0.0, 1.0))
+        nearest_treasure = float(np.clip(hero_feat[11], 0.0, 1.0))
+        danger = float(np.clip(1.0 - nearest_monster, 0.0, 1.0))
+
+        treasure_feat = np.asarray(feature[treasure_start : treasure_start + Config.TREASURE_UNIT_DIM], dtype=np.float32)
+        monster_feat = np.asarray(feature[monster_start : monster_start + Config.MONSTER_UNIT_DIM], dtype=np.float32)
+
+        has_treasure = float(treasure_feat[0] > 0.5)
+        has_monster = float(monster_feat[0] > 0.5)
+
+        treasure_trigger = float(Config.RULE_GUIDE_TREASURE_TRIGGER)
+        danger_trigger = float(Config.RULE_GUIDE_DANGER_TRIGGER)
+        treasure_pull = np.clip((1.0 - nearest_treasure - treasure_trigger) / max(1.0 - treasure_trigger, 1e-6), 0.0, 1.0)
+        escape_pull = np.clip((danger - danger_trigger) / max(1.0 - danger_trigger, 1e-6), 0.0, 1.0)
+
+        if has_treasure < 0.5:
+            treasure_pull = 0.0
+        if has_monster < 0.5:
+            escape_pull = 0.0
+
+        behavior_strength = max(float(escape_pull), float(treasure_pull))
+        guide_scale = anneal * conf_scale * margin_scale * entropy_scale * behavior_strength
+        if guide_scale < float(Config.RULE_GUIDE_MIN_SCALE):
+            return logits
+
+        # Prefer moving away from nearest monster and toward nearest treasure.
+        raw_bias = np.zeros(Config.ACTION_NUM, dtype=np.float32)
+        dir_norm = np.linalg.norm(dirs, axis=1, keepdims=True)
+        dirs = dirs / np.clip(dir_norm, 1e-6, None)
+
+        if has_monster > 0.5:
+            m_vec = np.asarray([monster_feat[1], monster_feat[2]], dtype=np.float32)
+            m_norm = np.linalg.norm(m_vec)
+            if m_norm > 1e-6:
+                m_dir = m_vec / m_norm
+                escape_score = -np.matmul(dirs, m_dir)
+                raw_bias += float(Config.RULE_GUIDE_ESCAPE_WEIGHT) * escape_pull * escape_score
+
+        if has_treasure > 0.5:
+            t_vec = np.asarray([treasure_feat[1], treasure_feat[2]], dtype=np.float32)
+            t_norm = np.linalg.norm(t_vec)
+            if t_norm > 1e-6:
+                t_dir = t_vec / t_norm
+                chase_score = np.matmul(dirs, t_dir)
+                risk_damp = 1.0 - 0.7 * danger
+                raw_bias += float(Config.RULE_GUIDE_TREASURE_WEIGHT) * treasure_pull * max(0.0, risk_damp) * chase_score
+
+        max_abs = float(np.max(np.abs(raw_bias)))
+        if max_abs < 1e-6:
+            return logits
+
+        raw_bias = raw_bias / max_abs
+        max_bias = float(Config.RULE_GUIDE_MAX_BIAS)
+        bias = np.clip(raw_bias * guide_scale * max_bias, -max_bias, max_bias)
+        bias = bias * legal
+
+        legal_sum = float(np.sum(legal))
+        if legal_sum > 0:
+            bias_mean = float(np.sum(bias) / legal_sum)
+            bias = np.where(legal > 0.5, bias - bias_mean, 0.0)
+
+        return logits + bias
 
     def _legal_soft_max(self, input_hidden, legal_action):
         """Softmax with legal action masking (numpy).

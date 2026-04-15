@@ -265,10 +265,11 @@ class Preprocessor:
         w = len(map_info[0])
         cr = h // 2
         cc = w // 2
+        view_radius = Config.MAP_VIEW_RADIUS
         idx = 0
         walkable_cnt = 0
-        for r in range(cr - 2, cr + 3):
-            for c in range(cc - 2, cc + 3):
+        for r in range(cr - view_radius, cr + view_radius + 1):
+            for c in range(cc - view_radius, cc + view_radius + 1):
                 v = 0.0
                 if 0 <= r < h and 0 <= c < w:
                     v = 1.0 if map_info[r][c] != 0 else 0.0
@@ -284,7 +285,7 @@ class Preprocessor:
             self._ray_depth(map_info, cr, cc, 0, 1),
         ]
         avg_depth = float(sum(dir_depth)) / 4.0
-        stats[0] = float(walkable_cnt) / 25.0
+        stats[0] = float(walkable_cnt) / float(Config.MAP_GRID_DIM)
         stats[1] = _norm(avg_depth, 8.0)
         stats[2] = _norm(max(dir_depth), 8.0)
         stats[3] = _norm(min(dir_depth), 8.0)

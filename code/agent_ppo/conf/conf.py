@@ -16,7 +16,9 @@ class Config:
     # Feature dimensions / 特征维度（围绕决策重构）
     HERO_DIM = 16
     GLOBAL_DIM = 9
-    MAP_GRID_DIM = 25
+    MAP_VIEW_SIZE = 21
+    MAP_VIEW_RADIUS = MAP_VIEW_SIZE // 2
+    MAP_GRID_DIM = MAP_VIEW_SIZE * MAP_VIEW_SIZE
     MAP_STAT_DIM = 4
 
     MAX_TREASURE = 10
